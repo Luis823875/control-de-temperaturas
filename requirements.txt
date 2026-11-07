@@ -1,3 +1,5 @@
 streamlit
 mysql-connector-python
 reportlab
+pywhatkit
+pyserial
