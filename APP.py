@@ -26,6 +26,12 @@ TIEMPO_ESPERA_ALERTA = 300
 if "ultima_alerta" not in st.session_state:
   st.session_state.ultima_alerta = 0
 
+# Inicializar memoria para que los datos nunca desaparezcan de la pantalla
+if "temp_actual" not in st.session_state:
+  st.session_state.temp_actual = 0.0
+if "hum_actual" not in st.session_state:
+  st.session_state.hum_actual = 0.0
+
 
 def detectar_puerto_arduino():
   """Busca automáticamente el puerto COM donde está conectado el Arduino."""
@@ -75,7 +81,6 @@ def generar_pdf(temp, hum):
   buffer = io.BytesIO()
   p = canvas.Canvas(buffer, pagesize=letter)
 
-  # Cabecera del Reporte
   p.drawString(
       50, 750, "REPORTE DE AUDITORÍA - CENTRO DE DATOS (SISTEMA CICSA)"
   )
@@ -114,13 +119,11 @@ with col1:
 with col2:
   st.subheader("Registro de Alertas y Estado del Sistema")
   alerta_box = st.empty()
-
-  # Espacio reservado para el botón de descarga en PDF
   st.markdown("### Exportar Datos")
   pdf_placeholder = st.empty()
 
 # ==========================================
-# MANEJO DE CONEXIÓN SERIAL PERSISTENTE
+# CONEXIÓN SERIAL PERSISTENTE Y ESTABILIZADA
 # ==========================================
 puerto_encontrado = detectar_puerto_arduino()
 
@@ -132,52 +135,53 @@ if not puerto_encontrado:
 else:
   st.info(f"🔍 Arduino detectado automáticamente en el puerto: {puerto_encontrado}")
 
-  # Abrir el puerto UNA SOLA VEZ y guardarlo en session_state para que el Arduino no se reinicie
+  # Abrir el puerto una sola vez y guardarlo en la sesión para evitar reinicios
   if "ser" not in st.session_state or not st.session_state.ser.is_open:
     try:
       st.session_state.ser = serial.Serial(
-          puerto_encontrado, BAUDIOS, timeout=2
+          puerto_encontrado, BAUDIOS, timeout=1
       )
-      time.sleep(2)  # Pausa inicial para estabilizar
+      time.sleep(2)
     except Exception as ex:
       st.error(f"Error al abrir el puerto serie: {ex}")
 
-  # Leer datos si la conexión está activa
+  # Intentar leer datos nuevos si el puerto está abierto
   if "ser" in st.session_state and st.session_state.ser.is_open:
     try:
       linea = st.session_state.ser.readline().decode("utf-8").strip()
-
       if linea and "," in linea:
         partes = linea.split(",")
-        t = float(partes[0])
-        h = float(partes[1])
-
-        # Actualizar métricas en la interfaz
-        metric_temp.metric(label="Temperatura (DHT22)", value=f"{t} °C")
-        metric_hum.metric(label="Humedad Relativa", value=f"{h} %")
-
-        # Generar el PDF en memoria con los datos actuales
-        pdf_bytes = generar_pdf(t, h)
-        pdf_placeholder.download_button(
-            label="📄 Descargar Reporte en PDF",
-            data=pdf_bytes,
-            file_name=f"reporte_centro_datos_{datetime.now().strftime('%H%M%S')}.pdf",
-            mime="application/pdf",
-        )
-
-        # Evaluar condición de alerta crítica
-        if t > LIMITE_TEMPERATURA:
-          alerta_box.error(
-              f"⚠️ ¡TEMPERATURA CRÍTICA! ({t} °C) - Enviando notificación"
-              " WhatsApp..."
-          )
-          enviar_alerta_whatsapp(t)
-        else:
-          alerta_box.success("✅ Sistema Operativo - Niveles Estables")
-
-    except ValueError:
+        st.session_state.temp_actual = float(partes[0])
+        st.session_state.hum_actual = float(partes[1])
+    except Exception:
       pass
 
-    # Refrescar la interfaz suavemente cada segundo sin cerrar el puerto
-    time.sleep(1)
-    st.rerun()
+  # Mostrar siempre los valores en pantalla (estáticos aunque el ciclo se refresque)
+  t = st.session_state.temp_actual
+  h = st.session_state.hum_actual
+
+  metric_temp.metric(label="Temperatura (DHT22)", value=f"{t} °C")
+  metric_hum.metric(label="Humedad Relativa", value=f"{h} %")
+
+  # Generar el PDF dinámico con los valores actuales
+  pdf_bytes = generar_pdf(t, h)
+  pdf_placeholder.download_button(
+      label="📄 Descargar Reporte en PDF",
+      data=pdf_bytes,
+      file_name=f"reporte_centro_datos_{datetime.now().strftime('%H%M%S')}.pdf",
+      mime="application/pdf",
+  )
+
+  # Evaluar condición de alerta crítica
+  if t > LIMITE_TEMPERATURA:
+    alerta_box.error(
+        f"⚠️ ¡TEMPERATURA CRÍTICA! ({t} °C) - Enviando notificación"
+        " WhatsApp..."
+    )
+    enviar_alerta_whatsapp(t)
+  else:
+    alerta_box.success("✅ Sistema Operativo - Niveles Estables")
+
+  # Refrescar la interfaz fluidamente cada segundo manteniendo la conexión fija
+  time.sleep(1)
+  st.rerun()
