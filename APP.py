@@ -78,77 +78,93 @@ def enviar_alerta_whatsapp(temp_actual):
 
 
 # ==========================================
-# FUNCIÓN PARA GENERAR PDF PROFESIONAL
+# FUNCIÓN PARA GENERAR PDF CON EL FORMATO DE TABLA EXACTO
 # ==========================================
 
 
-def generar_pdf(temp, hum):
+def generar_pdf(historial_registros):
   buffer = io.BytesIO()
   doc = SimpleDocTemplate(
       buffer,
       pagesize=letter,
-      rightMargin=40,
-      leftMargin=40,
-      topMargin=40,
-      bottomMargin=40,
+      rightMargin=30,
+      leftMargin=30,
+      topMargin=30,
+      bottomMargin=30,
   )
   elementos = []
   estilos = getSampleStyleSheet()
 
   titulo_estilo = ParagraphStyle(
-      "TituloReporte",
+      "EmpresaTitulo",
       parent=estilos["Heading1"],
-      fontSize=16,
-      textColor=colors.HexColor("#1A365D"),
-      spaceAfter=10,
+      fontSize=14,
+      fontName="Helvetica-Bold",
+      textColor=colors.HexColor("#000000"),
+      spaceAfter=4,
   )
   sub_estilo = ParagraphStyle(
-      "SubTitulo",
+      "SubEmpresa",
       parent=estilos["Normal"],
-      fontSize=10,
-      textColor=colors.HexColor("#4A5568"),
-      spaceAfter=20,
+      fontSize=9,
+      fontName="Helvetica",
+      textColor=colors.HexColor("#555555"),
+      spaceAfter=15,
   )
 
-  elementos.append(
-      Paragraph("REPORTE DE AUDITORÍA - CENTRO DE DATOS (SISTEMA CICSA)", titulo_estilo)
-  )
+  elementos.append(Paragraph("EMPRESA: CICSA", titulo_estilo))
   elementos.append(
       Paragraph(
-          f"Fecha y Hora de Emisión: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+          f"Reporte de Monitoreo IoT (Sensor DHT22) — Generado el"
+          f" {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
           sub_estilo,
       )
   )
-  elementos.append(Spacer(1, 10))
 
-  data = [
-      ["Parámetro de Control", "Valor Registrado", "Estado del Sistema"],
-      [
-          "Temperatura (DHT22)",
-          f"{temp} °C",
-          (
-              "⚠️ CRÍTICO"
-              if temp > LIMITE_TEMPERATURA
-              else "✅ ESTABLE"
-          ),
-      ],
-      ["Humedad Relativa", f"{hum} %", "✅ ÓPTIMO"],
-  ]
+  # Construir los datos de la tabla con los registros reales del historial
+  data = [["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]]
 
-  tabla = Table(data, colWidths=[200, 150, 150])
+  if historial_registros:
+    total_t = 0
+    total_h = 0
+    cantidad = len(historial_registros)
+
+    for i, reg in enumerate(historial_registros):
+      id_val = cantidad - i
+      t_val = reg["Temperatura (°C)"]
+      h_val = reg["Humedad (%)"]
+      f_val = reg["Fecha y Hora"]
+
+      total_t += t_val
+      total_h += h_val
+
+      data.append([str(id_val), f"{t_val} °C", f"{h_val} %", str(f_val)])
+
+    # Fila de promedio final
+    prom_t = round(total_t / cantidad, 1)
+    prom_h = round(total_h / cantidad, 1)
+    data.append(["Promedio", f"{prom_t} °C", f"{prom_h} %", "-"])
+  else:
+    data.append(["1", "0.0 °C", "0.0 %", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    data.append(["Promedio", "0.0 °C", "0.0 %", "-"])
+
+  tabla = Table(data, colWidths=[50, 130, 130, 230])
   tabla.setStyle(
       TableStyle([
-          ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+          ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111111")),
           ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
           ("ALIGN", (0, 0), (-1, -1), "CENTER"),
           ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-          ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-          ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F7FAFC")),
-          ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
-          ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-          ("FONTSIZE", (0, 1), (-1, -1), 10),
-          ("TOPPADDING", (0, 1), (-1, -1), 6),
-          ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
+          ("FONTSIZE", (0, 0), (-1, 0), 9),
+          ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+          ("TOPPADDING", (0, 0), (-1, 0), 6),
+          ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E2E8F0")),
+          ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+          ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+          ("FONTNAME", (0, 1), (-1, -2), "Helvetica"),
+          ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+          ("TOPPADDING", (0, 1), (-1, -1), 4),
+          ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
       ])
   )
 
@@ -159,7 +175,7 @@ def generar_pdf(temp, hum):
 
 
 # ==========================================
-# CONEXIÓN SERIAL BLINDADA Y PERSISTENTE
+# CONEXIÓN SERIAL Y LECTURA
 # ==========================================
 puerto_encontrado = detectar_puerto_arduino()
 
@@ -169,29 +185,15 @@ if not puerto_encontrado:
       " USB."
   )
 else:
-  # Asegurar que si ya hay una instancia abierta previa, se limpie de forma segura
-  if "ser" in st.session_state and st.session_state.ser.is_open:
-    pass  # Ya está abierta y conectada correctamente
-  else:
+  if "ser" not in st.session_state or not st.session_state.ser.is_open:
     try:
-      # Intentar cerrar por si acaso quedó un rastro zombie en memoria
-      if "ser" in st.session_state:
-        try:
-          st.session_state.ser.close()
-        except:
-          pass
-
       st.session_state.ser = serial.Serial(
           puerto_encontrado, BAUDIOS, timeout=1
       )
       time.sleep(2)
     except Exception as ex:
-      st.error(
-          f"⚠️ Puerto Ocupado ({puerto_encontrado}). Cierra otras terminales o el"
-          f" Monitor Serial. Detalle: {ex}"
-      )
+      st.error(f"Error al abrir el puerto serie: {ex}")
 
-  # Leer datos si el puerto está activo
   if "ser" in st.session_state and st.session_state.ser.is_open:
     try:
       linea = st.session_state.ser.readline().decode("utf-8").strip()
@@ -202,14 +204,13 @@ else:
         st.session_state.temp_actual = t
         st.session_state.hum_actual = h
 
-        # Registrar en el historial para la tabla
         nuevo_registro = {
             "Temperatura (°C)": t,
             "Humedad (%)": h,
             "Fecha y Hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         st.session_state.historial.insert(0, nuevo_registro)
-        if len(st.session_state.historial) > 20:
+        if len(st.session_state.historial) > 50:
           st.session_state.historial.pop()
     except Exception:
       pass
@@ -230,7 +231,6 @@ with col2:
 
 st.markdown("---")
 
-# TABLA DE ÚLTIMOS REGISTROS GUARDADOS
 st.subheader("📄 Últimos Registros Guardados")
 if st.session_state.historial:
   df_historial = pd.DataFrame(st.session_state.historial)
@@ -244,18 +244,16 @@ else:
 st.markdown("---")
 st.subheader("Generar Reporte Formal")
 
-t = st.session_state.temp_actual
-h = st.session_state.hum_actual
-
-pdf_bytes = generar_pdf(t, h)
+# Generar el PDF pasándole todo el historial acumulado
+pdf_bytes = generar_pdf(st.session_state.historial)
 st.download_button(
     label="📥 Descargar Reporte en PDF Profesional",
     data=pdf_bytes,
-    file_name=f"reporte_centro_datos_{datetime.now().strftime('%H%M%S')}.pdf",
+    file_name=f"reporte_cicsa_{datetime.now().strftime('%H%M%S')}.pdf",
     mime="application/pdf",
 )
 
-# Evaluar alertas
+t = st.session_state.temp_actual
 if t > LIMITE_TEMPERATURA:
   st.error(
       f"⚠️ ¡TEMPERATURA CRÍTICA! ({t} °C) - Enviando notificación WhatsApp..."
@@ -264,6 +262,5 @@ if t > LIMITE_TEMPERATURA:
 else:
   st.success("✅ Sistema Operativo - Niveles Estables")
 
-# Esperar 30 segundos antes de refrescar automáticamente
 time.sleep(30)
 st.rerun()
