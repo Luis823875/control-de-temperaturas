@@ -120,7 +120,7 @@ with col2:
   pdf_placeholder = st.empty()
 
 # ==========================================
-# BUCLE DE LECTURA Y ACTUALIZACIÓN FLUIDA
+# MANEJO DE CONEXIÓN SERIAL PERSISTENTE
 # ==========================================
 puerto_encontrado = detectar_puerto_arduino()
 
@@ -132,15 +132,22 @@ if not puerto_encontrado:
 else:
   st.info(f"🔍 Arduino detectado automáticamente en el puerto: {puerto_encontrado}")
 
-  try:
-    ser = serial.Serial(puerto_encontrado, BAUDIOS, timeout=2)
-    time.sleep(2)  # Pausa para estabilizar la conexión
+  # Abrir el puerto UNA SOLA VEZ y guardarlo en session_state para que el Arduino no se reinicie
+  if "ser" not in st.session_state or not st.session_state.ser.is_open:
+    try:
+      st.session_state.ser = serial.Serial(
+          puerto_encontrado, BAUDIOS, timeout=2
+      )
+      time.sleep(2)  # Pausa inicial para estabilizar
+    except Exception as ex:
+      st.error(f"Error al abrir el puerto serie: {ex}")
 
-    # Leer una línea limpia del puerto serial
-    linea = ser.readline().decode("utf-8").strip()
+  # Leer datos si la conexión está activa
+  if "ser" in st.session_state and st.session_state.ser.is_open:
+    try:
+      linea = st.session_state.ser.readline().decode("utf-8").strip()
 
-    if linea and "," in linea:
-      try:
+      if linea and "," in linea:
         partes = linea.split(",")
         t = float(partes[0])
         h = float(partes[1])
@@ -168,12 +175,9 @@ else:
         else:
           alerta_box.success("✅ Sistema Operativo - Niveles Estables")
 
-      except ValueError:
-        pass
+    except ValueError:
+      pass
 
-    ser.close()
+    # Refrescar la interfaz suavemente cada segundo sin cerrar el puerto
     time.sleep(1)
-    st.rerun()  # Refresca automáticamente para mantener los datos en vivo
-
-  except Exception as ex:
-    st.warning(f"Esperando datos del puerto serie o conexión ocupada: {ex}")
+    st.rerun()
