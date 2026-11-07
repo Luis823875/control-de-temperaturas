@@ -159,7 +159,7 @@ def generar_pdf(temp, hum):
 
 
 # ==========================================
-# CONEXIÓN SERIAL Y LECTURA
+# CONEXIÓN SERIAL BLINDADA Y PERSISTENTE
 # ==========================================
 puerto_encontrado = detectar_puerto_arduino()
 
@@ -169,16 +169,29 @@ if not puerto_encontrado:
       " USB."
   )
 else:
-  # Abrir puerto de manera persistente
-  if "ser" not in st.session_state or not st.session_state.ser.is_open:
+  # Asegurar que si ya hay una instancia abierta previa, se limpie de forma segura
+  if "ser" in st.session_state and st.session_state.ser.is_open:
+    pass  # Ya está abierta y conectada correctamente
+  else:
     try:
+      # Intentar cerrar por si acaso quedó un rastro zombie en memoria
+      if "ser" in st.session_state:
+        try:
+          st.session_state.ser.close()
+        except:
+          pass
+
       st.session_state.ser = serial.Serial(
           puerto_encontrado, BAUDIOS, timeout=1
       )
       time.sleep(2)
     except Exception as ex:
-      st.error(f"Error al abrir el puerto serie: {ex}")
+      st.error(
+          f"⚠️ Puerto Ocupado ({puerto_encontrado}). Cierra otras terminales o el"
+          f" Monitor Serial. Detalle: {ex}"
+      )
 
+  # Leer datos si el puerto está activo
   if "ser" in st.session_state and st.session_state.ser.is_open:
     try:
       linea = st.session_state.ser.readline().decode("utf-8").strip()
