@@ -1,168 +1,219 @@
-import io
+import datetime
+import threading
+import time
 import mysql.connector
+import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+import serial.tools.list_ports
 import streamlit as st
 
-
-# Configuración de la conexión a MySQL (Compatible con Aiven Cloud y Local)
-def conectar_db():
-  if "mysql" in st.secrets:
-    return mysql.connector.connect(
-        host=st.secrets["mysql"]["host"],
-        user=st.secrets["mysql"]["user"],
-        password=st.secrets["mysql"]["password"],
-        database=st.secrets["mysql"]["database"],
-        port=int(st.secrets["mysql"]["port"]),
-        ssl_disabled=False,
-    )
-  else:
-    # Conexión local en tu PC
-    return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="Luis2024$",
-        database="db_monitoreo",
-    )
+# ==========================================
+# 1. FUNCIÓN DE LECTURA SERIAL EN SEGUNDO PLANO
+# ==========================================
 
 
-# Configuración de la página web
+def obtener_puerto_automatico():
+  puertos = list(serial.tools.list_ports.comports())
+  for puerto in puertos:
+    desc = puerto.description.lower()
+    if (
+        "arduino" in desc
+        or "ch340" in desc
+        or "cp210x" in desc
+        or "usb-serial" in desc
+    ):
+      return puerto.device
+  if puertos:
+    return puertos[0].device
+  return None
+
+
+def background_reader():
+  """Hilo en segundo plano para leer del Arduino y guardar en Aiven"""
+  while True:
+    try:
+      conexion = mysql.connector.connect(
+          host="data-center-data-center.l.aivencloud.com",
+          port=12378,
+          user="avnadmin",
+          password="AVNS_DzxpEWnJIXz1PbKi3Ck",
+          database="defaultdb",
+          ssl_disabled=True,
+      )
+      cursor = conexion.cursor()
+
+      puerto = obtener_puerto_automatico()
+      if not puerto:
+        time.sleep(3)
+        continue
+
+      ser = serial.Serial(puerto, 115200, timeout=2)
+      time.sleep(2)  # Estabilizar conexión
+
+      while True:
+        linea = ser.readline().decode("utf-8", errors="ignore").strip()
+        if "Dato recibido:" in linea:
+          try:
+            partes = linea.split("Dato recibido:")[1].split(",")
+            t = float(partes[0].strip())
+            h = float(partes[1].strip())
+
+            sql = "INSERT INTO lecturas (temperatura, humedad) VALUES (%s, %s)"
+            cursor.execute(sql, (t, h))
+            conexion.commit()
+          except Exception:
+            pass
+        time.sleep(1)
+    except Exception:
+      time.sleep(5)
+
+
+# Iniciar el hilo de lectura automática solo si no está activo
+if "hilo_iniciado" not in st.session_state:
+  st.session_state["hilo_iniciado"] = True
+  t_thread = threading.Thread(target=background_reader, daemon=True)
+  t_thread.start()
+
+
+# ==========================================
+# 2. CONFIGURACIÓN DE LA INTERFAZ STREAMLIT
+# ==========================================
 st.set_page_config(
-    page_title="Monitoreo Data Center", page_icon="📊", layout="centered"
+    page_title="Monitoreo IoT - CICSA / Movistar", page_icon="📊", layout="wide"
 )
 
-# Manejo de sesión simple
-if "autenticado" not in st.session_state:
-  st.session_state["autenticado"] = False
+st.title("📊 Centro de Monitoreo IoT - CICSA / Movistar")
+st.markdown(
+    "Sistema automatizado: Lectura de sensor DHT22, almacenamiento en Aiven"
+    " MySQL y generación de reportes en PDF."
+)
+st.markdown("---")
 
-# Pantalla de Login
-if not st.session_state["autenticado"]:
-  st.title("🔐 Iniciar Sesión - Monitoreo")
-  usuario = st.text_input("Usuario")
-  password = st.text_input("Contraseña", type="password")
+# Conexión para leer los datos en la interfaz
+try:
+  conn_ui = mysql.connector.connect(
+      host="data-center-data-center.l.aivencloud.com",
+      port=12378,
+      user="avnadmin",
+      password="AVNS_DzxpEWnJIXz1PbKi3Ck",
+      database="defaultdb",
+      ssl_disabled=True,
+  )
+  cursor_ui = conn_ui.cursor()
+  cursor_ui.execute(
+      "SELECT id, temperatura, humedad, fecha_registro FROM lecturas ORDER BY id"
+      " DESC LIMIT 15"
+  )
+  registros = cursor_ui.fetchall()
+except Exception as e:
+  st.error(f"Error de conexión a la base de datos: {e}")
+  registros = []
 
-  if st.button("Ingresar"):
-    if usuario == "admin" and password == "1234":
-      st.session_state["autenticado"] = True
-      st.rerun()
-    else:
-      st.error("Usuario o contraseña incorrectos")
+if registros:
+  temps = [r[1] for r in registros]
+  hums = [r[2] for r in registros]
+  prom_temp = sum(temps) / len(temps)
+  prom_hum = sum(hums) / len(hums)
 
-else:
-  st.title("🌡️ Panel de Monitoreo Ambiental - Data Center")
-  st.write("Datos en tiempo real obtenidos desde el ESP32 y guardados en MySQL.")
+  col1, col2 = st.columns(2)
+  col1.metric("Temperatura Actual", f"{temps[0]:.1f} °C")
+  col2.metric("Humedad Actual", f"{hums[0]:.1f} %")
 
-  if st.button("Cerrar Sesión"):
-    st.session_state["autenticado"] = False
-    st.rerun()
+  st.subheader("📋 Últimos Registros Guardados")
 
-  st.divider()
+  df = pd.DataFrame(
+      registros, columns=["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]
+  )
+  st.dataframe(df, use_container_width=True)
 
-  try:
-    conexion = conectar_db()
-    cursor = conexion.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT * FROM lecturas ORDER BY fecha_registro DESC LIMIT 15"
+  # Botón para descargar el reporte en PDF con diseño serio (Blanco, negro y gris)
+  st.markdown("### Generar Reporte Formal")
+  if st.button("📥 Descargar Reporte en PDF Profesional"):
+    pdf_filename = "reporte_cicsa_movistar.pdf"
+    doc = SimpleDocTemplate(
+        pdf_filename,
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
     )
-    lecturas = cursor.fetchall()
-    conexion.close()
+    elementos = []
 
-    if lecturas:
-      ultimo = lecturas[0]
-      col1, col2 = st.columns(2)
-      col1.metric("Temperatura Actual", f"{ultimo['temperatura']} °C")
-      col2.metric("Humedad Actual", f"{ultimo['humedad']} %")
+    styles = getSampleStyleSheet()
+    titulo_style = ParagraphStyle(
+        "TituloEmpresa",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        textColor=colors.black,
+        spaceAfter=4,
+    )
+    sub_style = ParagraphStyle(
+        "SubTitulo",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10,
+        textColor=colors.HexColor("#595959"),
+        spaceAfter=15,
+    )
 
-      st.subheader("📋 Últimos Registros Guardados")
-      st.dataframe(lecturas, use_container_width=True)
-
-      # --- Generador de PDF Profesional ---
-      def generar_pdf_profesional():
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=letter,
-            rightMargin=40,
-            leftMargin=40,
-            topMargin=40,
-            bottomMargin=40,
+    elementos.append(
+        Paragraph("EMPRESA: CICSA / MOVISTAR - CENTRO DE DATOS", titulo_style)
+    )
+    elementos.append(
+        Paragraph(
+            f"Reporte de Monitoreo IoT (Sensor DHT22) — Generado el"
+            f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            sub_style,
         )
-        elementos = []
+    )
+    elementos.append(Spacer(1, 10))
 
-        styles = getSampleStyleSheet()
+    data_tabla = [["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]]
+    for reg in registros:
+      data_tabla.append(
+          [str(reg[0]), f"{reg[1]:.1f} °C", f"{reg[2]:.1f} %", str(reg[3])]
+      )
 
-        # Estilos personalizados
-        titulo_estilo = ParagraphStyle(
-            "TituloReporte",
-            parent=styles["Heading1"],
-            fontSize=18,
-            textColor=colors.HexColor("#1f2937"),
-            spaceAfter=6,
-        )
-        sub_estilo = ParagraphStyle(
-            "SubReporte",
-            parent=styles["Normal"],
-            fontSize=10,
-            textColor=colors.HexColor("#6b7280"),
-            spaceAfter=20,
-        )
+    # Fila de promedios calculados
+    data_tabla.append(
+        ["Promedio", f"{prom_temp:.1f} °C", f"{prom_hum:.1f} %", "-"]
+    )
 
-        elementos.append(
-            Paragraph("Reporte Técnico de Monitoreo Ambiental", titulo_estilo)
-        )
-        elementos.append(
-            Paragraph(
-                "Sistema IoT - Data Center | Universidad Privada del Norte",
-                sub_estilo,
-            )
-        )
+    tabla = Table(data_tabla, colWidths=[50, 115, 115, 220])
+    tabla.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.black),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("GRID", (0, 0), (-1, -2), 0.5, colors.HexColor("#CCCCCC")),
+            ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+            ("LINEBELOW", (0, -1), (-1, -1), 1.5, colors.black),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F2F2F2")),
+        ])
+    )
 
-        # Preparar datos para la tabla formal de ReportLab
-        data = [["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]]
-        for row in lecturas:
-          data.append([
-              str(row["id"]),
-              f"{row['temperatura']} °C",
-              f"{row['humedad']} %",
-              str(row["fecha_registro"]),
-          ])
+    elementos.append(tabla)
+    doc.build(elementos)
 
-        # Crear tabla con diseño profesional
-        tabla = Table(data, colWidths=[40, 120, 100, 260])
-        tabla.setStyle(
-            TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#007bff")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f9fafb")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d1d5db")),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 1), (-1, -1), 9),
-                ("TOPPADDING", (0, 1), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
-            ])
-        )
-
-        elementos.append(tabla)
-        doc.build(elementos)
-        buffer.seek(0)
-        return buffer
-
-      pdf_data = generar_pdf_profesional()
-
+    with open(pdf_filename, "rb") as f:
       st.download_button(
-          label="📥 Descargar Reporte en PDF Profesional",
-          data=pdf_data,
-          file_name="reporte_tecnico_sensores.pdf",
+          label="📄 Clic aquí para descargar el PDF",
+          data=f,
+          file_name="reporte_cicsa_movistar.pdf",
           mime="application/pdf",
       )
-    else:
-      st.info("No hay lecturas registradas todavía en la base de datos.")
-
-  except Exception as e:
-    st.error(f"Error al conectar con la base de datos: {e}")
+else:
+  st.warning(
+      "Conectando al sensor o esperando registros en la base de datos..."
+  )
