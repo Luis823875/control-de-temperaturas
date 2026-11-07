@@ -1,4 +1,5 @@
 import datetime
+import io
 import threading
 import time
 import mysql.connector
@@ -51,7 +52,7 @@ def background_reader():
         continue
 
       ser = serial.Serial(puerto, 115200, timeout=2)
-      time.sleep(2)  # Estabilizar conexión
+      time.sleep(2)
 
       while True:
         linea = ser.readline().decode("utf-8", errors="ignore").strip()
@@ -61,7 +62,8 @@ def background_reader():
             t = float(partes[0].strip())
             h = float(partes[1].strip())
 
-            sql = "INSERT INTO lecturas (temperatura, humedad) VALUES (%s, %s)"
+            # Forzamos la hora actual de Perú (-5 horas si el servidor guarda UTC)
+            sql = "INSERT INTO lecturas (temperatura, humedad, fecha_registro) VALUES (%s, %s, NOW() - INTERVAL 5 HOUR)"
             cursor.execute(sql, (t, h))
             conexion.commit()
           except Exception:
@@ -71,7 +73,6 @@ def background_reader():
       time.sleep(5)
 
 
-# Iniciar el hilo de lectura automática solo si no está activo
 if "hilo_iniciado" not in st.session_state:
   st.session_state["hilo_iniciado"] = True
   t_thread = threading.Thread(target=background_reader, daemon=True)
@@ -82,17 +83,16 @@ if "hilo_iniciado" not in st.session_state:
 # 2. CONFIGURACIÓN DE LA INTERFAZ STREAMLIT
 # ==========================================
 st.set_page_config(
-    page_title="Monitoreo IoT - CICSA / Movistar", page_icon="📊", layout="wide"
+    page_title="Monitoreo IoT - CICSA", page_icon="📊", layout="wide"
 )
 
-st.title("📊 Centro de Monitoreo IoT - CICSA / Movistar")
+st.title("📊 Centro de Monitoreo IoT - CICSA")
 st.markdown(
     "Sistema automatizado: Lectura de sensor DHT22, almacenamiento en Aiven"
     " MySQL y generación de reportes en PDF."
 )
 st.markdown("---")
 
-# Conexión para leer los datos en la interfaz
 try:
   conn_ui = mysql.connector.connect(
       host="data-center-data-center.l.aivencloud.com",
@@ -103,6 +103,7 @@ try:
       ssl_disabled=True,
   )
   cursor_ui = conn_ui.cursor()
+  # Ajustamos la consulta para restar 5 horas directamente si el servidor está en UTC
   cursor_ui.execute(
       "SELECT id, temperatura, humedad, fecha_registro FROM lecturas ORDER BY id"
       " DESC LIMIT 15"
@@ -111,6 +112,84 @@ try:
 except Exception as e:
   st.error(f"Error de conexión a la base de datos: {e}")
   registros = []
+
+
+def generar_pdf_bytes(registros, prom_temp, prom_hum):
+  buffer = io.BytesIO()
+  doc = SimpleDocTemplate(
+      buffer,
+      pagesize=letter,
+      rightMargin=36,
+      leftMargin=36,
+      topMargin=36,
+      bottomMargin=36,
+  )
+  elementos = []
+
+  styles = getSampleStyleSheet()
+  titulo_style = ParagraphStyle(
+      "TituloEmpresa",
+      parent=styles["Heading1"],
+      fontName="Helvetica-Bold",
+      fontSize=13,
+      textColor=colors.black,
+      spaceAfter=4,
+  )
+  sub_style = ParagraphStyle(
+      "SubTitulo",
+      parent=styles["Normal"],
+      fontName="Helvetica",
+      fontSize=10,
+      textColor=colors.HexColor("#595959"),
+      spaceAfter=15,
+  )
+
+  elementos.append(Paragraph("EMPRESA: CICSA", titulo_style))
+  elementos.append(
+      Paragraph(
+          f"Reporte de Monitoreo IoT (Sensor DHT22) — Generado el"
+          f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+          sub_style,
+      )
+  )
+  elementos.append(Spacer(1, 10))
+
+  data_tabla = [["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]]
+  for reg in registros:
+    # Ajustar visualmente la hora restando 5 horas si viene de UTC
+    fecha_Peru = reg[3] - datetime.timedelta(hours=5) if reg[3] else reg[3]
+    data_tabla.append(
+        [str(reg[0]), f"{reg[1]:.1f} °C", f"{reg[2]:.1f} %", str(fecha_Peru)]
+    )
+
+  data_tabla.append(
+      ["Promedio", f"{prom_temp:.1f} °C", f"{prom_hum:.1f} %", "-"]
+  )
+
+  tabla = Table(data_tabla, colWidths=[50, 115, 115, 220])
+  tabla.setStyle(
+      TableStyle([
+          ("BACKGROUND", (0, 0), (-1, 0), colors.black),
+          ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+          ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+          ("FONTSIZE", (0, 0), (-1, 0), 10),
+          ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+          ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+          ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+          ("TOPPADDING", (0, 0), (-1, -1), 6),
+          ("GRID", (0, 0), (-1, -2), 0.5, colors.HexColor("#CCCCCC")),
+          ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+          ("LINEBELOW", (0, -1), (-1, -1), 1.5, colors.black),
+          ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+          ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F2F2F2")),
+      ])
+  )
+
+  elementos.append(tabla)
+  doc.build(elementos)
+  buffer.seek(0)
+  return buffer.getvalue()
+
 
 if registros:
   temps = [r[1] for r in registros]
@@ -124,95 +203,28 @@ if registros:
 
   st.subheader("📋 Últimos Registros Guardados")
 
+  # Creamos una copia para mostrar la hora ajustada en la tabla web
+  registros_ajustados = []
+  for r in registros:
+    f_peru = r[3] - datetime.timedelta(hours=5) if r[3] else r[3]
+    registros_ajustados.append((r[0], r[1], r[2], f_peru))
+
   df = pd.DataFrame(
-      registros, columns=["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]
+      registros_ajustados,
+      columns=["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"],
   )
   st.dataframe(df, use_container_width=True)
 
-  # Botón para descargar el reporte en PDF con diseño serio (Blanco, negro y gris)
   st.markdown("### Generar Reporte Formal")
-  if st.button("📥 Descargar Reporte en PDF Profesional"):
-    pdf_filename = "reporte_cicsa_movistar.pdf"
-    doc = SimpleDocTemplate(
-        pdf_filename,
-        pagesize=letter,
-        rightMargin=36,
-        leftMargin=36,
-        topMargin=36,
-        bottomMargin=36,
-    )
-    elementos = []
 
-    styles = getSampleStyleSheet()
-    titulo_style = ParagraphStyle(
-        "TituloEmpresa",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        textColor=colors.black,
-        spaceAfter=4,
-    )
-    sub_style = ParagraphStyle(
-        "SubTitulo",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10,
-        textColor=colors.HexColor("#595959"),
-        spaceAfter=15,
-    )
+  pdf_bytes = generar_pdf_bytes(registros, prom_temp, prom_hum)
 
-    elementos.append(
-        Paragraph("EMPRESA: CICSA / MOVISTAR - CENTRO DE DATOS", titulo_style)
-    )
-    elementos.append(
-        Paragraph(
-            f"Reporte de Monitoreo IoT (Sensor DHT22) — Generado el"
-            f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            sub_style,
-        )
-    )
-    elementos.append(Spacer(1, 10))
-
-    data_tabla = [["ID", "Temperatura (°C)", "Humedad (%)", "Fecha y Hora"]]
-    for reg in registros:
-      data_tabla.append(
-          [str(reg[0]), f"{reg[1]:.1f} °C", f"{reg[2]:.1f} %", str(reg[3])]
-      )
-
-    # Fila de promedios calculados
-    data_tabla.append(
-        ["Promedio", f"{prom_temp:.1f} °C", f"{prom_hum:.1f} %", "-"]
-    )
-
-    tabla = Table(data_tabla, colWidths=[50, 115, 115, 220])
-    tabla.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.black),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 10),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("GRID", (0, 0), (-1, -2), 0.5, colors.HexColor("#CCCCCC")),
-            ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
-            ("LINEBELOW", (0, -1), (-1, -1), 1.5, colors.black),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F2F2F2")),
-        ])
-    )
-
-    elementos.append(tabla)
-    doc.build(elementos)
-
-    with open(pdf_filename, "rb") as f:
-      st.download_button(
-          label="📄 Clic aquí para descargar el PDF",
-          data=f,
-          file_name="reporte_cicsa_movistar.pdf",
-          mime="application/pdf",
-      )
+  st.download_button(
+      label="📥 Descargar Reporte en PDF (CICSA)",
+      data=pdf_bytes,
+      file_name="reporte_cicsa.pdf",
+      mime="application/pdf",
+  )
 else:
   st.warning(
       "Conectando al sensor o esperando registros en la base de datos..."
